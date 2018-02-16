@@ -1,0 +1,971 @@
+<!DOCTYPE HTML>
+<html>
+
+<head>
+<style>
+
+* {
+   box-sizing: border-box;
+}
+
+.infobar
+{
+ float: left;
+ line-height : 5px;
+ height: 160px;
+}
+.infobar.one {
+    width: 25%;
+    }
+.infobar.two {
+     width : 25%;
+    }
+.infobar.three {
+        width : 25%;
+       }
+</style>
+</head>
+
+<body>
+
+
+
+<div class="infobar one">
+   	<button onclick="start()"> start</button>
+	<button onclick="flip_display_mode()"> Flat\Polar </button>
+    <button onclick="simulate(1)">Water</button>
+	<p id="my_line"> wcs v0.07 in javascript. </p>
+	<p id="display_info0"> current display mode is <var id="display_info0_0">Polar</var></p>
+	<p id="mouse co-ords"> mouse cart x&y <var id="mousex"></var> <var id="mousey"></var></p>
+	<p id="mouse info 2">mouse polar lat&r <var id="mouselat"></var> <var id="mouser"></var></p>
+	<p id="zoom_info">zoom  <var id="zoom0"></var></p>
+</div>
+<div class="infobar two">
+	<p id="mouse node_info0"> mouse object type : <var id="mouse_object_type"</var></p>
+	<p id="mouse node_info1"> mouse node id     : <var id="mouse_node_id"</var></p>
+    <p id="mouse node_info2">   pressure        : <var id="mouse_pressure"</var></p>
+    <p id="mouse info3">                      x : <var id="mouse_object_x"</var></p>
+    <p id="mouse info3">                      y : <var id="mouse_object_y"</var></p>
+</div>
+<div class="infobar three">
+ <form id="info_form">
+  node depth <input type="text" name="node_depth" value="3"><br>
+  node density <input type="text" name="node_density" value="64"><br>
+ </form>
+</div>
+
+<canvas id="canv" width="1000" height="600" onmousemove="getMousePos(event)" onmouseout="clearCoord()" onMouseDown="mouseclick(event)" ></canvas>
+<p> Use Left and Right Keys to Rotate World </p>
+
+<script>
+
+var node_list=[];
+var bind_list=[];
+var rand_seed=1;
+var world_time=1;
+var forwards=1;
+var hist=[];
+var non=0;
+var nob=0;
+var root=null;
+var search_id=0;
+var remap_id=0; // used to move regions
+var draw_mode=1;
+var display_id=0;
+var mousex,mousey,mouse_node,mouse_object;  // mouse near node, the node nearest the mouse
+var mouse_lat,mouser;
+var root_lat=0.0;
+var sim_var ; // used to hold the water simulation javascript repeater function ( setInterval )
+var node_density,node_depth;
+
+var water_p // a global water pressure! temporary for while we work with only 1 water source
+
+var zoom=1; // display zoom
+const ax=500; //set disply axis position
+const ay=300;
+var cx=0; // camera position
+var cy=0;
+
+var water_list=[]; // a list of nodes with active water 
+var water_taps=[] ;
+
+document.addEventListener('keydown',user_rotate,false);
+
+// add mouse wheel support
+
+var canv = document.getElementById("canv");
+var ctx=canv.getContext("2d");
+
+
+if (canv.addEventListener)
+{
+    // IE9, Chrome, Safari, Opera
+    canv.addEventListener("mousewheel", MouseWheelHandler, false);
+    // Firefox
+    canv.addEventListener("DOMMouseScroll", MouseWheelHandler, false);
+}
+// IE 6/7/8
+else
+{    canv.attachEvent("onmousewheel", MouseWheelHandler);    }
+
+
+function user_rotate(e)
+{
+ var c=e.keyCode;
+ if (c==39) root_lat=root_lat+0.02;
+ if (c==37) root_lat=root_lat-0.02;
+ get_all_carts();
+ display_world(draw_mode);
+}
+
+
+function Water_Tap(n,p,rate)
+{
+ this.n=n; // node
+ this.tap_pressure=p;
+ this.g_pressure ;// group pressure for all nodes with water from this tap
+ this.rate=rate; // number of flood fill nodes per cycle
+ water_taps.push(this);
+ 
+ this.inject=function() // begin a flood fill
+ {  
+  if (this.n.pressure<this.tap_pressure) 
+   {
+    this.n.pressure=this.n.pressure+0.1;
+    water_list.push(this.n);
+   }
+ }
+ 
+} // end water tap
+
+
+
+function mouseclick(e)
+{
+    w=canv.width/2;
+    h=canv.height/2;
+	var rd=0;
+    
+    switch(e.button)
+    {
+        case 0 :
+		    if (!try_object_select(e)) // try select node 1st, if fail, then move map
+                {
+                 cx=cx+(w-(e.clientX-canv.offsetLeft))///(zoom);
+                 cy=cy+(h-(e.clientY-canv.offsetTop))///(zoom);
+                 rd=1;
+                }
+            if (rd) display_world(draw_mode)
+    }
+}
+
+
+function try_object_select(e)
+{
+ 
+ if (!mouse_object) return;
+ if (mouse_object instanceof Node)
+ if (Math.abs(mousex-mouse_object.x)<5 && Math.abs(mousey-mouse_object.y)<5) // 
+	{        return true;      	}
+    
+ if (mouse_object instanceof Bind)
+  {
+   const b=mouse_object;
+   var x = (b.node1.x+b.node0.x)/2 ;
+   var y = (b.node1.y+b.node0.y)/2 ;
+   if (Math.abs(mousex-x)<5 && Math.abs(mousey-y)<5) // 
+    {
+     b.active=!b.active;
+     b.redraw_bind();
+     return true;
+    }
+  } 
+ 
+}
+
+
+function redraw_mouse_object(col)
+{
+ if (mouse_object instanceof Node) mouse_object.redraw_node(col);
+ if (mouse_object instanceof Bind) mouse_object.redraw_bind(col);
+}
+
+
+function update_mouse_node(e) 
+{
+ var n=mouse_object;
+ var mx=mousex,my=mousey; // mouse x and y
+ var x,y,d,d2;
+ var nx=n.x,ny=n.y;
+ var mbdi; // mouse bind distance index
+ 
+ if (!(n instanceof Node)) { return ;}
+ 
+ d=(nx-mx)*(nx-mx)+(ny-my)*(ny-my);
+ 
+ for (i in n.bl) // this is for nodes, need code to hanfle when n is a bind
+ {
+  // get bind mid point
+  var x2=n.get_binded_node(i).x;
+  var y2=n.get_binded_node(i).y;
+  x=(nx+x2)/2.0;
+  y=(ny+y2)/2.0;
+  // filter closest bind
+  d2=(mx-x)*(mx-x)+(my-y)*(my-y);
+  if (d2<d) {mbdi=i;d=d2;}
+ }
+ if (mbdi) 
+ {
+  ctx.beginPath();
+  redraw_mouse_object()  ;
+  mouse_object=n.bl[mbdi];
+  redraw_mouse_object("#CC00AA");
+  ctx.stroke();
+ }
+ return ;
+ 
+} // end function
+ 
+
+
+function update_mouse_bind(e) 
+{
+ var b=mouse_object;
+ var mx=mousex,my=mousey; // mouse x and y
+ var x,y,d,d2;
+ var mbdi,bd=99999.9 ; // minimum distance bind index
+ var i=0; // loop variable
+
+ if (!(b instanceof Bind)) return;
+ 
+ var bx=(b.node0.x+b.node1.x)/2.0;
+ var by=(b.node0.y+b.node1.y)/2.0;
+
+ d=(bx-mx)*(bx-mx)+(by-my)*(by-my); 
+ 
+ nx=b.node0.x; 
+ ny=b.node0.y;
+ d2=(nx-mx)*(nx-mx)+(ny-my)*(ny-my);
+ 
+ ctx.beginPath();
+ redraw_mouse_object();
+ 
+ if (d2<d)   {   mouse_object=b.node0;  d=d2;  }
+
+ nx=b.node1.x;
+ ny=b.node1.y;
+ 
+ d2=(nx-mx)*(nx-mx)+(ny-my)*(ny-my); 
+ if (d2<d) mouse_object=b.node1;
+ 
+ redraw_mouse_object("#CC00AA");
+ ctx.stroke();
+ 
+}
+
+function update_mouse_object(e)
+{ // see if there's a node closer to the mouse
+ if (!mouse_object) {mouse_object=node_list[0];return;}
+ if (mouse_object instanceof Node) update_mouse_node(e);
+  else if (mouse_object instanceof Bind) update_mouse_bind(e);
+
+ return ;  
+  
+ var n=mouse_object;
+ var mx,my; // mouse x and y
+ var x,y,d,d2;
+ var mbdi,bd=99999.9 ; // minimum distance bind index
+ var i=0; // loop variable
+ 
+ mx=mousex;
+ my=mousey;
+ if (n instanceof Node)
+ {
+    nx=n.x;
+    ny=n.y;
+ }
+  else if (n instanceof Bind)
+  {
+   nx=(n.node0.x+n.node1.x)/2.0
+   ny=(n.node0.y+n.node1.y)/2.0
+  }
+ 
+ d=(nx-mx)*(nx-mx)+(ny-my)*(ny-my);
+
+  
+ if (n instanceof Node)
+ {
+    for (i in n.bl) // this is for nodes, need code to hanfle when n is a bind
+    {
+    // get bind mid point
+    var x2=n.get_binded_node(i).x;
+    var y2=n.get_binded_node(i).y;
+    x=(nx-x2)/2.0;
+    y=(ny-y2)/2.0;
+    // filter closest bind
+    d2=x*x+y*y;
+    if (d2<bd) {mbdi=i;bd=d2;}
+    }
+    if (bd<d) { mouse_object=n.bl[mbdi];debugger;}
+ 
+ 
+    for (i in n.bl)
+    {
+     var n2=n.get_binded_node(i);
+     d2=(n2.x-mx)*(n2.x-mx)+(n2.y-my)*(n2.y-my);
+     if (d2<d && d2<bd )
+     {
+        ctx=canv.getContext("2d");
+        ctx.beginPath();
+        n.redraw_node();
+        mouse_node=n2;
+        mouse_object=n2;
+        mouse_object.redraw_node("#CC00AA");
+        ctx.stroke();
+        break;
+     }
+    }
+ }
+
+} // end function
+
+function MouseWheelHandler(e)
+{
+    // cross-browser wheel delta
+    var e = window.event || e; // old IE support
+    var delta = Math.max(-1, Math.min(1, (e.wheelDelta || -e.detail)));
+    // delta is +1 for mouse scroll up, -1 for mouse scroll down
+    zoom=zoom+(zoom*delta*0.15);
+    display_world(draw_mode)
+    
+    return false;
+}
+
+
+function getMousePos(e) 
+{
+     var mn,mp
+     const rect=document.getElementById("canv").getBoundingClientRect();
+    
+     if (draw_mode===1)
+     {
+        mousex=Math.round((e.clientX-(ax+cx+rect.left))/zoom);
+        mousey=Math.round((e.clientY-(ay+cy+rect.top))/zoom);
+        mouse_lat=Math.atan2(mousey,mousex);
+        mouser=Math.sqrt(mousex*mousex+mousey*mousey);
+     }
+      else
+        {           
+         mouse_lat= (e.clientX-(ax+cx+rect.left))/(zoom*100);        
+         mouser=((ay+cy+rect.top)-e.clientY)/zoom;
+         mousex=mouser*Math.cos(mouse_lat);
+         mousey=mouser*Math.sin(mouse_lat);
+        }
+
+
+     document.getElementById("mousex").innerHTML=mousex.toFixed(0);
+     document.getElementById("mousey").innerHTML=mousey.toFixed(0);
+     document.getElementById("mouselat").innerHTML=mouse_lat.toFixed(2);
+     document.getElementById("mouser").innerHTML=mouser.toFixed(1);
+	 document.getElementById("zoom0").innerHTML=zoom;
+	 
+     const mt = get_mouse_object_type() ;
+     if (mouse_object instanceof Node)
+     {
+	  mn = mouse_object ? mouse_object.id : "none" ;
+      mp = mouse_object ? mouse_object.pressure : "none"
+     }
+     
+     document.getElementById("mouse_object_type").innerHTML=mt;
+	 document.getElementById("mouse_node_id").innerHTML=mn;
+     document.getElementById("mouse_pressure").innerHTML=mp;
+     if (mouse_object instanceof Node)
+     {
+      document.getElementById("mouse_object_x").innerHTML=mouse_object.x.toFixed(1);
+      document.getElementById("mouse_object_y").innerHTML=mouse_object.y.toFixed(1);
+     }
+     else if (mouse_object instanceof Bind)
+     {
+      const b=mouse_object;
+      if (b.xa===0) {b.get_abs_bind_coords();}
+      document.getElementById("mouse_object_x").innerHTML=b.xa.toFixed(1);
+      document.getElementById("mouse_object_y").innerHTML=b.ya.toFixed(1);
+     }
+     
+     var i=0;
+     while (i<5) {	update_mouse_object(e);i++; }
+}
+
+
+function get_mouse_object_type()
+{ // bleh, a shortfall of javascript? or is there a better way to do this?
+ if (mouse_object instanceof Node) return "Node";
+ if (mouse_object instanceof Bind) return "Bind";
+}
+
+
+function clearCoord()
+{
+    document.getElementById("mousex").innerHTML="out";//e.clientX-rect.left;
+    document.getElementById("mousey").innerHTML="out";//e.clientY-rect.top;
+}
+
+
+function flip_display_mode()
+{
+ draw_mode=1-draw_mode; // done, now tell the document to update its info
+ var x=document.getElementById("display_info0_0") 
+ if (draw_mode===1)
+    {document.getElementById("display_info0_0").innerHTML="Polar";}
+  else
+    {document.getElementById("display_info0_0").innerHTML="Flat";}
+ if (node_list!==[])    { display_world(draw_mode); }
+}
+
+
+function Bind(n0,n1,r,lat)
+{ // a vector from node0 to node1
+ this.node0=n0;
+ this.node1=n1;
+ this.r=r;
+ this.lat=lat;
+ this.x=0; // relative vector between nodes ( defining )
+ this.y=0; //
+ this.xa=0; // 0,0,1 map projection of bind ( temporary , not concrete )
+ this.ya=0; //
+ this.strength=1.0; // max tension before fracture
+ this.tension=0.0; //positive -> tension, negative -> compression
+ this.perm=0.1+Math.random()*0.5; // permiability , how easy water flows via this bind, binds are also conduits
+ 
+ this.active=true; // active binds refresh the coords of nearby nodes when they themselves are refreshed
+                // inactive dont, halting the 'flood-fill' of new coords, effectively a fracture in the mesh
+ this.last_draw=0;
+ this.node0.bl.push(this);
+ this.node1.bl.push(this);
+ bind_list.push(this);
+ 
+ 
+ this.cut=function() // remove bind
+ {
+  for (i in this.node0.bl) { if (this.node0.bl[i]==this) this.node0.bl.splice(i,1) }
+  for (i in this.node1.bl) { if (this.node1.bl[i]==this) this.node1.bl.splice(i,1) }
+ }
+ 
+ 
+ this.get_abs_bind_coords=function()
+ {
+  // get some absolute bind coords, half way point between its defining nodes
+  // absolute bind coords are not used as causal, defining or concreate values,
+  //  but sometimes its useful to know them
+  this.xa=(this.node1.x+this.node0.x)/2;
+  this.ya=(this.node1.y+this.node0.y)/2;  
+  
+ }
+ 
+ 
+ this.set_node_coords=function()
+ { // define the bind vector from the positions of its nodes
+   // the tail wags the dog. binds are supposed to define the location of nodes
+   // but when rebinding 2 existing nodes, easier to vice versa
+   this.x=this.node1.x-this.node0.x;
+   this.y=this.node1.y-this.node0.y;
+   this.lat=Math.atan2(this.node1.y,this.node1.x)-Math.atan2(this.node0.y,this.node0.x);
+   this.r= this.node1.r-this.node0.r;
+ }
+ 
+ 
+ this.redraw_bind=function(col)
+ {
+  
+  if (!col) 
+   {
+    col="#666666";
+    if (!this.active) {col="#557700";debugger}
+   }
+  ctx.strokeStyle=col;  
+  ctx.beginPath();
+  if (draw_mode)
+        {
+         ctx.moveTo(ax+cx+zoom*this.node0.x,ay+cy+zoom*(this.node0.y));
+         ctx.lineTo(ax+cx+zoom*this.node1.x,ay+cy+zoom*(this.node1.y));
+        }
+    else
+        {
+         ctx.moveTo(cx+ax+zoom*(100*this.node0.lat),ay+cy+zoom*(-this.node0.r));
+         ctx.moveTo(cx+ax+zoom*(100*this.node0.lat),ay+cy+zoom*(-this.node0.r));
+         ctx.lineTo(cx+ax+zoom*(100*this.node1.lat),ay+cy+zoom*(-this.node1.r));
+        }
+  ctx.stroke();
+  
+ }
+  
+}
+
+
+function Node() // a mesh of nodes
+{
+ this.x=0.0; // cart co-ords
+ this.y=0.0;
+ this.r=0.0; // polar 
+ this.lat=0.0; // latitude
+ this.bl=[]; // near vertex list
+ this.id=non;
+ this.perm=Math.random() ; // water permiabilty
+ this.pressure=0.0;
+ this.color="#888888";
+ this.tap ; // once watered, need to know group pressure from tap
+ this.water_proxy ; // a bind that is supplying the water
+ non=non+1
+ 
+ this.search_id=0; // internal used for searching for near nodes
+ this.remap_id=0; // internal used for repositioning region
+ this.last_draw=0; // internal used for drawing map
+ 
+ 
+ node_list.push(this);
+ 
+ this.redraw_node = function(col)
+ { // draw a specific node. useful for quick mouse node redraws w/p redrawing whole display
+	var ctx=canv.getContext("2d");
+    if (col) ctx.fillStyle = col;
+        else ctx.fillStyle = this.color;
+        
+    if (draw_mode===1)  ctx.fillRect(this.x*zoom+cx+ax,this.y*zoom+cy+ay,6,6); 
+        else     		ctx.fillRect(100*this.lat*zoom+cx+ax,-this.r*zoom+cy+ay,6,6);
+        
+ }
+ 
+ 
+ this.node_color_wp = function() // water presssure
+ {
+  var r,g,b;
+  if (this.pressure<5)
+  {
+   r=Math.round(20*this.pressure);
+   g=Math.round(20*this.pressure);
+   b=Math.round(50*this.pressure);
+  }
+  else 
+  {
+   r=100;
+   g=100;
+   b=250;   
+  }
+  this.color="rgba("+r+","+g+","+b+",255)";
+ }
+ 
+ 
+ this.angle=function(n) {  return Math.atan2(n.y-this.y,n.x-this.x); }
+ this.angle2=function(n0,n1) {  return this.angle(n1)-this.angle(n0); }
+ 
+ 
+ this.get_binded_node=function(i)
+ {  if (this.bl[i]) { return ( this.bl[i].node0===this ? this.bl[i].node1 : this.bl[i].node0 ) }  }
+ 
+ 
+ this.cart_to_polar=function()
+ {
+  this.lat=Math.atan2(this.y,this.x);
+  this.r=Math.sqrt(this.x*this.x+this.y*this.y);
+ }
+ 
+ 
+ this.polar_to_cart=function()
+ {
+  this.x=this.r*Math.cos(this.lat);
+  this.y=this.r*Math.sin(this.lat);
+ }
+  
+ 
+ this.get_near_nodes=function()
+ {  // only use this if nodes have been cart positioned
+  var search_list=[];
+  for (i in this.bl) {search_list.push(this.get_binded_node(i)) }
+  var ok=1;
+  var nnl=[]; // near node list, going to use 4 nearest nodes
+  //for (i in this.bl) {nnl.push(this.get_binded_node(i)) }
+  search_id++;
+  var cycles=0
+  
+  while (cycles<20)
+  {
+   var n=search_list.shift()
+   if (!n) 
+   { // end of search 
+    this.isolate();
+    for (i in nnl)   { var b=new Bind(this,nnl[i],0,0);b.set_node_coords();}  
+    return ;
+   }
+   
+   n.search_id=search_id;   
+   ok=1;
+   for (i in nnl)
+   {
+        if (Math.abs(mod_dif(this.angle2(n,nnl[i]),0,2*Math.PI))<1.0)
+            {
+             if (dist(this,n)<dist(this,nnl[i]))
+                 { nnl[i]=n;ok=0;break }// replace
+             else
+                 { ok=0;break}
+            }    
+   }
+   if (ok) { nnl.push(n); } // get here if no existing nodes in same angle range
+
+      // add binded nodes to the search list
+   for (var i in n.bl)
+   {
+    var n2=n.get_binded_node(i);
+    if ((n2!==this) && (n2.search_id<search_id))
+    {
+     search_list.push(n2);
+     n2.search_id=search_id;  
+    }
+   }
+   
+   cycles++;
+  }
+ 
+  this.isolate();
+  for (i in nnl)   { var b=new Bind(this,nnl[i],0,0);b.set_node_coords();} 
+  
+ }
+
+ 
+ this.isolate=function() // cut all bindings of this node
+ { // javascript way, gotta delete all references then garbage collector deletes the bind instance
+  for (var i in this.bl)
+  {
+   var n=this.get_binded_node(i);
+   for (var j in n.bl)	{ if (n.get_binded_node(j)===this) n.bl.splice(j,1)}
+  }
+  this.bl=[];
+ }
+ /*
+ this.seed_displace_polar(r,lat) // 
+ {
+  this.r=this.r+r;
+  this.lat=this.lat+lat;
+  this.polar_to_cart();
+  this.seed_displace(); 
+ }
+ 
+ this.seed_displace_cart=function(x,y)
+ {
+  this.x=this.x+x;
+  this.y=this.y+y;
+  this.cart_to_polar();
+  this.seed_displace();
+ }*/
+ 
+ this.spread_water=function()
+ {
+   
+  for (var i in this.bl)
+  {
+   var n=this.get_binded_node(i);
+   if (n.pressure<this.pressure && n.bl[i].active===true) 
+   {
+    if ((1/this.bl[i].perm)<this.pressure) 
+    { 
+     n.pressure=n.pressure+this.bl[i].perm;
+     if (n.pressure>this.pressure) n.pressure=this.pressure;
+      else                         water_list.push(this);
+     n.node_color_wp();
+     n.redraw_node(); // inefficient : may be redrawn multiple times // consider making a redraw register
+     water_list.push(n);
+    }// spread
+   }
+  }
+  
+ }
+ 
+ 
+ 
+ this.flush_water=function() // same function as spread water, node pressure condition reverseed
+ {
+   
+  for (var i in this.bl)
+  {
+   var n=this.get_binded_node(i);
+   if (n.pressure>this.pressure) // reversed compared to spread water
+   {
+    if (this.bl[i]!==this.water_proxy) // can't flush to upstream
+    {
+     n.pressure=n.pressure-0.3; // fairly rapid depressurize
+     if (n.pressure>this.pressure) n.pressure=this.pressure;
+      else                         water_list.push(this);
+     n.node_color_wp();
+     n.redraw_node(); // inefficient : may be redrawn multiple times // consider making a redraw register
+     flush_list.push(n);
+    }// spread
+   }
+  }
+  
+ }
+ 
+ 
+ 
+  
+ 
+ 
+ this.seed_displace=function(a,b,dt)
+ {
+  var x,y;
+
+  if (dt=="cart")
+  {
+   this.x=this.x+a;
+   this.y=this.y+b;
+   this.cart_to_polar();
+   x=a;
+   y=b;
+   // if root node is altered, then its r should be changed
+  }
+  else if (dt=="polar")
+  { // displace x,y according to polar displacement. has difficultys
+   // r needs an absolute value to yield cartesian
+
+      
+   // left undone until figure out how we gonna do this
+  }
+  else { return } 
+ 
+  remap_id++;
+
+  // start node already displaced
+  var remap_list=[];
+  remap_list.push(this);
+  
+  while (true)
+  {
+   var n=remap_list.shift(); 
+   if (!n) {return;}
+   
+   for (var i in n.bl)
+   {
+    if (n.bl[i].active) // connected to this fragment -> continue to spread flood 
+        {
+         n.remap_id=remap_id;        
+         remap_list.push(n.get_binded_node(i)); 
+        }
+     else // disconnected, binding relative positions need to be displaced \ adjusted
+     { 
+      var b=n.bl[i];
+      if (n.bl[i].node0===n) { b.x=b.x+x; b.y=b.y+y; }
+       else                  { b.x=b.x-x; b.y=b.y-y; }
+     }
+
+   }
+  }
+ }
+ 
+} // end of node definition
+
+
+function dist(n1,n2)
+{
+ if ((n1 instanceof Node) && (n2 instanceof Node))
+	{  return Math.sqrt((n1.x-n2.x)*(n1.x-n2.x)+(n1.y-n2.y)*(n1.y-n2.y)); }
+}
+
+
+function array_max(a)
+{
+ if (typeof(a)==="Array")
+ {
+  var max=-9e307;
+  for (var i in a)
+    {  if (a[i]>max) {max=a[i];index=i}  }
+  
+  return [index,max];
+ }
+}
+
+
+function create_world()
+{
+ root=new Node();
+ var n=root;
+ var n2=n;
+ const latd=2*Math.PI/node_density;
+  
+ // a couple of nodes down
+ for (var j=0;j<node_density;j++)
+ {
+  for (i=0;i<node_depth-1;i++) 
+  {
+   var n3=new Node();
+   var b=new Bind(n2,n3,5.0,0.0);
+   n2=n3;
+  }
+ 
+  if (j===node_density-1) break;
+  n2=new Node();
+  var b=new Bind(n,n2,0.0,latd);
+  n=n2;
+ }
+ 
+ w=new Water_Tap(n,999.0,1.0);
+ b=new Bind(n,root,0.0,latd); // finally bind last node to the 1st to make a ring
+
+ get_all_carts()
+ for (i in node_list) { node_list[i].get_near_nodes() }
+}
+
+
+function start()
+{
+ node_list=[];
+ non=0;
+ bind_list=[];
+ 
+ var x=document.getElementById("info_form");
+ 
+ node_depth=x[0].value;
+ node_density=x[1].value;
+ 
+ 
+ create_world();
+ display_world(draw_mode);
+ 
+}
+
+
+function update_water(cycles)
+{
+ var i=0;
+ while (i<cycles)
+ {
+  var n=water_list.shift();
+  if (n)
+    {  if (n.id===150){debugger;}   n.spread_water();   }
+   else
+    {     for (j in water_taps) water_taps[j].inject()    }
+  i++;
+ }
+}
+
+
+function simulate(cycles)
+{ sim_var=window.setInterval(function(){update_water(500);},1);}
+
+function get_all_carts() 
+ // draw_modeesian=1 will give a circular map, =0 will give a flat map
+{
+ display_id++;
+ 
+ var n=node_list[0];
+
+ n.lat=root_lat;
+ n.r=100;
+ n.x=n.r*Math.cos(n.lat);
+ n.y=n.r*Math.sin(n.lat);
+ 
+ var i=0;
+ var draw_list=[];
+ draw_list.push(node_list[0]);
+
+ // flood fill method
+ while (true)
+ {
+  var n=draw_list[i];
+  if (!n) {break}
+  
+  // draw stuff
+  n.last_draw=display_id;
+ 
+  for (var j in n.bl)
+  {
+    var b=n.bl[j];
+    if (b.node0===n)
+        {
+         if (b.node1.last_draw<display_id) 
+           {
+            draw_list.push(b.node1);
+            b.node1.lat=n.lat+b.lat;
+            b.node1.r=n.r+b.r;
+            
+            b.node1.x=b.node1.r*Math.cos(b.node1.lat);
+            b.node1.y=b.node1.r*Math.sin(b.node1.lat);
+           }
+        }
+    else
+        {
+         if (b.node0.last_draw<display_id) 
+         {
+          draw_list.push(b.node0);
+          b.node0.lat=n.lat-b.lat; // negative
+          b.node0.r=n.r-b.r; 
+          
+          b.node0.x=b.node0.r*Math.cos(b.node0.lat);
+          b.node0.y=b.node0.r*Math.sin(b.node0.lat);
+         }
+        }
+     
+  }
+ 
+  i++;
+ }
+ 
+}
+
+
+function display_world()
+{ 
+ display_id++;
+ var canv= document.querySelector("#canv");
+ var ctx=canv.getContext("2d");
+ ctx.fillStyle="#222222"; // draw background
+ ctx.fillRect(0,0,canv.width,canv.height); 
+ 
+ ctx.beginPath();  // draw axis
+ ctx.strokeStyle="#CACACA";
+ ctx.moveTo(canv.width/2,0);
+ ctx.lineTo(canv.width/2,canv.height);
+ ctx.moveTo(0,canv.height/2);
+ ctx.lineTo(canv.width,canv.height/2);
+ ctx.stroke();
+ 
+ ctx.fillStyle="#555555";
+ for (i in node_list) { node_list[i].redraw_node() ; }
+ for (i in bind_list) { bind_list[i].redraw_bind() ; }
+ 
+ if (mouse_object)
+ {
+  if (mouse_object instanceof Node)  mouse_object.redraw_node("#CC00AA");
+  if (mouse_object instanceof Bind)  mouse_object.redraw_bind("#CC00AA");
+ }
+ ctx.stroke(); 
+}
+
+ // maths functions
+
+ function mymod(x,m)
+ { // my variation of the modulo function. no reflection at 0 
+  if (x>=0) return x%m;
+  // else
+  x=-x;
+  x=x%m;
+  if (x===0) return 0;
+  // else
+  return m-x;
+ }
+   
+ function mod_dif(x,y,m)
+ {// the shortest vector x->y in modulo m
+  z=mymod(y-x,m);
+  if (z>m/2) return z-m;
+  // else
+  return z;
+ }
+
+ // to do
+ // flush water
+ //     ^ needs deactivated binds
+ //                 ^ needs selectable binds
+ //                              ^ needs bind-mouse sensor
+ 
+ 
+</script>
+</body>
+</html>
