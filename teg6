@@ -1,0 +1,2377 @@
+Import MaxGui.Drivers
+
+Include "C:\Users\James\Documents\jamesblitzmax\mylibs\mathslib.bmx"
+
+SeedRnd(1)
+
+Global input_state=0 '  0 = rotate map, 1 = select node
+
+Global nodelist:node[4999999]
+Global regionlist:region[999]
+Global worldregion:region
+Global zoom!=3.5
+Global nowr ' number of world regions
+
+Global gw,gh
+Global px:TPixmap=CreatePixmap(gw*2,gh*2,PF_BGR888)
+Global xmax,ymax
+
+Global md3=0
+
+Global displaymode ' used to decide what to display, map altitude or regions
+					' 0 = altitude, 1 = regions
+					' 00 = flat , 10 = oblate , 20 = globe
+
+
+Global oldmousenode:node[2]
+Global mousenode:node=Null
+Global selectednode:node=Null
+
+Global mf:map_formatter
+
+Global mox,moy ' abs mouse coords
+Global mox2,moy2 ' cntreed and zoomed mouse coords
+Global mox3!,moy3! ' cart map coordinates
+
+Global kdflag=0,debug1=0
+Global event
+Global ed
+Global noni ' number of node indices in the nodelist, the max index in the nodelist, which isn't necessirily the total number of nodes
+
+Global worldtime,frame
+
+Global menu_new=1000,menu_load=1001,menu_save=1002
+Global menu_map=1100,menu_regions=1101
+Global menu_flat=1110,menu_oblate=1111,menu_globe=1112
+Global menu_altitude=1200
+
+Global fragment_regions=101,flip_invisible=102
+
+Global tidy_c
+
+Global window:tgadget=CreateWindow("tegress v0.6",0,0,1280,1024-164,Null,WINDOW_TITLEBAR)
+Global panel:tgadget=CreatePanel(2,0,380,60,window,PANEL_GROUP,"le tegress controls")
+Global filemenu:tgadget=CreateMenu("&File",0,WindowMenu(window))
+Global viewmenu:tgadget=CreateMenu("&View",0,WindowMenu(window))
+Global toolmenu:tgadget=CreateMenu("&Tools",0,WindowMenu(window))
+
+CreateMenu"&New",MENU_NEW,filemenu,KEY_N,MODIFIER_COMMAND
+CreateMenu"&Open",MENU_LOAD,filemenu,KEY_O,MODIFIER_COMMAND
+CreateMenu"&Save",MENU_SAVE,filemenu,KEY_S,MODIFIER_COMMAND
+
+CreateMenu("Flat map view",menu_flat,viewmenu,0,MODIFIER_COMMAND)
+CreateMenu("Oblate map view",menu_oblate,viewmenu,0,MODIFIER_COMMAND)
+CreateMenu("Globe map view",menu_globe,viewmenu,0,MODIFIER_COMMAND)
+CreateMenu("",0,viewmenu)
+CreateMenu("map",menu_map,viewmenu,0,MODIFIER_COMMAND)
+CreateMenu("regions",menu_regions,viewmenu,0,MODIFIER_COMMAND)
+
+CreateMenu("Altitude Getter",menu_altitude,toolmenu,0)
+
+UpdateWindowMenu window
+
+CreateButton("Alter View",15,5,80,30,panel,BUTTON_RADIO|BUTTON_PUSH)
+CreateButton("Select Node",100,5,80,30,panel,BUTTON_RADIO|BUTTON_PUSH)
+CreateButton("Select Region",185,5,80,30,panel,BUTTON_RADIO|BUTTON_PUSH)
+
+Global mousemenu:TGadget
+mousemenu=CreateMenu("regionpopup",0,Null)
+CreateMenu ("fragment region",fragment_regions,mousemenu)
+CreateMenu ("flip invisible ",flip_invisible,mousemenu)
+
+Global canvas:Tgadget=CreateCanvas(0,0,1280,860,window)
+SetGraphics CanvasGraphics(canvas)
+
+gh=canvas.lockch/2
+gw=canvas.lockcw/2
+
+Global moz=MouseZ()
+
+
+Type node
+ Field x!,y!,z!
+ Field theta!,phi!
+ Field alt! ' altitude
+ Field col,col2 ' col is the map colour, col2 is the colour that ends up being used depending on display setttings
+ Field nnl:node[20]
+ Field id
+ Field flags ' %1  delete flag, probably necessary if objects have to be deleted by deferencing them
+ Field reg:region             ' %2 candidate node for adding to new fragment region
+ Field hnni ' highest near node index
+ 
+
+ Method setcol2() ' col2 i the colour thats used
+
+  Select displaymode
+   Case 0
+    If reg.flags & 1 Then col2=100000+col Else col2=col
+   Case 1
+    col2 = reg.id*12345678+12345675+(reg.flags & 1)*100000
+  End Select
+
+ End Method
+
+
+
+ Method pick_random_near_node:node()
+  Local p
+ 
+  If hnni>-1 
+   p=Rand(hnni)
+   If nnl[p] And (nnl[p].flags & 1=0) Then Return nnl[p]
+  EndIf
+
+  tidy_nnl()
+  If hnni>-1 
+   p=Rand(hnni)
+   If nnl[p] Then Return nnl[p]  
+  EndIf
+   
+  Return Null
+ End Method
+
+
+ Method tidy_nnl()  
+  Local i,j
+
+  If nnl=Null Then DebugLog ("tidy node list called on null list at time "+worldtime+" for region "+id)
+
+  While nnl[j]
+   If nnl[j].flags & 1=1
+    nnl[j]=Null
+   Else
+    nnl[i]=nnl[j]
+    i=i+1
+   EndIf
+ 
+   j=j+1
+  Wend
+
+  While i<j
+   nnl[i]=Null
+   i=i+1
+  Wend
+
+  hnni=i-1
+ End Method
+
+
+ Method cart_to_spherical()
+  Local w!
+
+  theta=coord_to_angle(x,y)
+  theta=mod2f(theta,360.0)
+
+  w!=Sqr(x*x+y*y)
+  phi=coord_to_angle(w,z) ' should Return angle 270..360~0..90
+
+  If phi>=0.0 And phi<=90 Then phi=90.0-phi
+  If phi>=270.0 Then phi=180.0-(phi-270.0)
+ End Method
+
+End Type
+
+
+
+Type fragment_grower
+ Field cl:node[999999]
+ Field p
+ Field parent:region
+ Field frag_region:region
+ Field n:node
+ Field nocn ' number of candidate nodes
+ Field nullc ' null count in candidate list
+
+ Method New(par:region,nr:region,seed:node)
+
+  Local i=0,j
+  parent=par:region
+  frag_region=nr:region
+  n=seed:node
+  add_node(seed)
+
+ End Method
+
+
+ Method add_node(N3:node)
+  
+  Local i,j,dbnl:node[]
+
+  If (N3.flags & 2) Then N3.flags=N3.flags-2
+  frag_region.add_node(n3)
+  While i<20
+   dbnl:node[]=n.nnl
+   If n.nnl[i] And (n.nnl[i].flags & 3=0) And n.nnl[i].reg=parent
+    cl[j]=n.nnl[i]
+    cl[j].flags=cl[j].flags | 2
+    j=j+1
+   EndIf
+
+   i=i+1
+  Wend
+
+  nocn=nocn+j
+
+ End Method
+
+
+
+ Method grow_fragment()
+
+  Local t,i,ok
+  Local cnull,cdel,cpar,dn
+  
+ ' Print " starting grow frag "
+ ' dn=check_list_for_duplicates(cl)
+ ' If dn>0 Then Print " found "+dn+" duplicates at grow frag "+frag_region.id
+
+  While t<100 ' try add a new node from candidate node list
+   If nocn<1 Then Return
+   p=Rand(nocn-1)
+   If cl[p] And (cl[p].flags & 1)=0 And cl[p].reg=parent 
+    n=frag_region.add_node(cl[p])
+    cl[p].flags=cl[p].flags-2
+    cl[p]=Null
+    nullc=nullc+1
+    If Double(nullc)/Double(nocn)>0.2 Then tidy_candidate_list();nullc=0
+    ok=1
+    Exit
+   EndIf
+
+   t=t+1
+  Wend
+  
+ ' Print " middle of grow frag "
+ ' dn=check_list_for_duplicates(cl)
+ ' If dn>0 Then Print " found "+dn+" duplicates at grow frag "+frag_region.id
+
+  ' now add new node's near nodes to candidate list
+  If t<100
+   i=0
+   While i<8
+    If n.nnl[i] And (n.nnl[i].flags & 3=0) And n.nnl[i].reg=parent
+     cl[nocn]=n.nnl[i]
+     cl[nocn].flags=cl[nocn].flags | 2
+     nocn=nocn+1
+    EndIf
+
+    i=i+1
+   Wend
+
+  Else
+   ' failed to select a single candidate
+   ' either they all null or they assigned to different region already
+   ' check
+
+   i=0   
+   While i<nocn
+    If Not cl[i] Then cnull=cnull+1
+    If cl[i] And (cl[i].flags & 1)=1 Then cdel=cdel+1
+    If cl[i] And cl[i].reg<>parent Then cpar=cpar+1
+    i=i+1
+   Wend
+   Print " fail report "+cnull+" nodes were dead "+cdel+" nodes were flaged del "+cpar+" nodes were assigned elsewhere from "+i+" nodes"
+
+   tidy_candidate_list()
+  EndIf
+ 
+ ' Print " ending grow frag "
+ ' dn=check_list_for_duplicates(cl)
+ ' If dn>0 Then Print " found "+dn+" duplicates at grow frag "+frag_region.id
+
+  Return ok
+  
+ End Method
+
+
+ Method tidy_candidate_list()
+
+  Local i,j
+
+'  Print "tidying candidate list "
+
+  While i<nocn
+   If cl[i] And (cl[i].flags & 1=0) And cl[i].reg=parent
+    cl[j]=cl[i]
+    j=j+1
+   EndIf
+
+   i=i+1
+  Wend
+
+  i=j
+  While i<nocn
+   cl[i]=Null
+   i=i+1
+  Wend
+
+  nocn=j
+  tidy_c=tidy_c+1
+  If tidy_c Mod 5000=0 Then Print "tidied candiate lists "+tidy_c+" times "
+
+ End Method
+
+
+End Type
+
+
+
+Type region
+ Field nl:node[9999999] ' a node in the region
+ Field sr:region[200] ' sub region
+ Field centre:node ' centre node
+ Field id
+ Field noni ' last index used in list
+ Field non  ' number of nodes in region
+ Field nosr  ' number of sub regions
+ Field parent:region
+ Field flags ' %1 user selected, %2 invisible
+ Field rquat:quat ' rotation quat
+
+ Method New()
+  regionlist[nowr]=Self
+  rquat=New quat
+  id=nowr
+  nowr=nowr+1
+ End Method
+
+
+ Method add_node:node(n:node)
+  nl[noni]=n
+  n.reg=Self
+  noni=noni+1
+  non=non+1
+
+  Return n
+ End Method
+
+
+ Method add_sub_region(r:region)  
+  sr[nosr]=r
+  nosr=nosr+1
+ End Method
+
+
+ Method random_fragment(x)
+  ' select x seed nodes at random
+  ' currently small chance may create less than x seeds due to picking same node repeatedly
+
+  Local cl:node[999999] ' candidate list
+  Local rfg:fragment_grower[99]
+  Local p=-1,i=0,j,m,tidy=0,z=0,mold=-1
+  Local n:node,nn:node
+  Local r:region
+
+  While i<x And j<5000
+   n:node = pick_random_node()
+   If n.reg=Self
+    r:region=New region
+    add_sub_region(r)
+
+    rfg[i]=New fragment_grower(Self,r,n)
+
+    i=i+1
+   EndIf
+
+   j=j+1
+  Wend
+
+
+  m=i
+  While mold<non ' got to have a measure of number of nodes left to distribute to fragments
+   i=0
+   While i<x
+    If rfg[i]
+     mold=m
+     If rfg[i] Then m=m+rfg[i].grow_fragment()
+
+     If mold=m ' failed to add new node, so finish growing, terminate this grow object
+      rfg[i].frag_region.set_centre_node()
+      rfg[i].frag_region.resize(0.98)
+      rfg[i]=Null
+      Exit
+     EndIf
+
+     If m Mod 5000=0 Then tidy=1   
+     If rfg[i]
+      If (m Mod 10000=0) And rfg[i] Then Print " added "+rfg[i].frag_region.non+" nodes to region "+rfg[i].frag_region.id+" for a total of "+m+" distributed nodes"
+     EndIf
+    EndIf
+
+    i=i+1
+    z=z+1
+   Wend
+
+   If tidy
+    i=0
+    While i<x
+    ' Print " tidying candidate for frag grower "+i
+ 
+     If rfg[i] Then rfg[i].tidy_candidate_list()
+
+     i=i+1
+    Wend
+    tidy=0
+  
+   EndIf
+   
+  Wend
+    
+ End Method
+
+
+ Method pick_random_node:node()
+  Local t=0,p=0
+
+  While t<50 
+   p=Rand(noni)
+   If nl[p] And (nl[p].flags & 1=0) Then Return nl[p]
+   t=t+1
+  Wend
+
+  DebugLog "pick random node : couldn't pick node from region "+id+" at time "+worldtime
+ End Method
+
+
+ Method tidy_nodelist()
+  Local j=0,i=0
+
+  If nl=Null Then DebugLog ("tidy node list called on null list at time "+worldtime+" for region "+id)
+
+  While nl[j] Or j<noni Or j<non
+   If nl[j] And (nl[j].flags & 1)=1
+    nl[j]=Null
+   Else
+    nl[i]=nl[j]
+    i=i+1
+   EndIf
+ 
+   j=j+1
+  Wend
+
+  non=i
+  noni=i
+  
+  While i<j
+   nl[i]=Null
+   i=i+1
+  Wend
+
+ End Method
+
+
+ Method merge_nodes_check()
+
+  Local n:node=nodelist[0]
+  Local nb:node=Null
+  Local i=0,m=0,j
+
+  While n
+   m=m+merge_node_check(n,nb)
+   If n.flags & 1=0 Then nb=n
+'   If i Mod 10000=0 Then Print " checkd "+j+" nodes for merge"
+   i=i+1
+   j=j+1
+   If i Mod xmax=0 And m>0 
+    i=i-xmax
+    m=0
+   EndIf
+
+   n=nodelist[i]
+  Wend
+
+  tidy_nodelist()
+
+ End Method
+
+
+ Method vector_rotate_down(ang!)  ' intended for internal use only
+
+  Local sin_down!=Sin(ang)
+  Local cos_down!=Cos(ang)
+  Local n:node=Null
+  Local i=0
+  Local xo!,w!
+
+  While nl[i]
+   n=nl[i]
+ 
+   xo!=n.x
+   n.x=xo*cos_down-n.z*sin_down
+   n.z=xo*sin_down+n.z*cos_down
+
+   n.theta=coord_to_angle(n.x,n.y)
+   n.theta=mod2f(n.theta,360.0)
+
+   w!=Sqr(n.x*n.x+n.y*n.y)
+   n.phi=coord_to_angle(w,n.z) 'should Return angle 270..360~0..90
+
+   If n.phi>=0.0 And n.phi<=90 Then n.phi=90.0-n.phi
+   If n.phi>=270.0 Then n.phi=180.0-(n.phi-270.0)
+
+   i=i+1
+  Wend
+
+ End Method
+
+
+ Method vector_rotate_right(ang!)
+ 
+  Local cos_right!=Cos(ang)
+  Local sin_right!=Sin(ang)
+  Local n:node=Null
+  Local i=0
+  Local xo!
+
+  While nl[i]
+   n=nl[i]
+   n.theta=mod2f(n.theta+ang,360.0) 
+   xo!=n.x
+   n.x=xo*cos_right-n.y*sin_right
+   n.y=xo*sin_right+n.y*cos_right
+
+   i=i+1
+  Wend
+  
+ End Method
+
+
+ Method cart_shift_clock(ang!)
+
+  ang=-ang
+  Local sin_clock!=Sin(ang)
+  Local cos_clock!=Cos(ang)
+  Local n:node=Null
+  Local i=0
+  Local yo!,w!
+
+  While nl[i]
+   n=nl[i]
+
+   yo!=n.y
+   n.y=yo*cos_clock-n.z*sin_clock
+   n.z=yo*sin_clock+n.z*cos_clock
+
+   n.theta=coord_to_angle(n.x,n.y)
+
+   w!=Sqr(n.x*n.x+n.y*n.y)
+   n.phi=coord_to_angle(w,n.z) ' should Return angle 270..360~0..90
+
+   If n.phi>=0.0 And n.phi<=90 Then n.phi=90.0-n.phi
+   If n.phi>=270.0 Then n.phi=180.0-(n.phi-270.0)
+
+   i=i+1
+  Wend
+
+ End Method
+
+
+ Method set_centre_node()
+
+  Local i,j,t
+  Local x!,y!,z!,norm!,d!,d2!
+  Local n:node,n3:node
+
+  Print " starting set centre node for region "+id
+
+  While nl[i]
+   If (nl[i].flags & 1)=0
+    x=x+nl[i].x
+    y=y+nl[i].y
+    z=z+nl[i].z
+    j=j+1
+   EndIf
+
+   i=i+1
+  Wend
+
+  If j>0
+   x=x/Double(j)
+   y=y/Double(j)
+   z=z/Double(j)
+   norm=Sqr(x*x+y*y+z*z)
+   x=x/norm
+   y=y/norm
+   z=z/norm
+  EndIf
+
+  ' ok find node nearest average position
+  ' to do
+  ' select random node
+
+  While t<20  ' try 20 times
+   n=pick_random_node()
+   If n
+    d=(n.x-x)*(n.x-x)+(n.y-y)*(n.y-y)+(n.z-z)*(n.z-z)
+    
+    i=0
+    While i<n.hnni
+    ' look at near nodes, see if closer
+     n3=n.nnl[i]
+     If n3 And (n3.flags & 1)=0
+      d2=(n3.x-x)*(n3.x-x)+(n3.y-y)*(n3.y-y)+(n3.z-z)*(n3.z-z)
+      If d2<d
+       d=d2
+       n=n3
+       i=-1
+      EndIf
+     EndIf
+
+     i=i+1
+    Wend
+
+    If d<0.1 
+     centre=n 
+     Print " set centre node : success for region "+id
+     Return ' consider change, set very high
+    EndIf
+
+   EndIf
+
+   t=t+1
+  Wend
+
+  Print " warning, failed to find decent centre node for region "+id
+
+ End Method
+
+
+ Method resize(m!)
+  ' the tegress rotate to pole method for vary region size
+  Local i
+  Local p!,t!
+
+  centre.cart_to_spherical()
+  p=centre.phi
+  t=centre.theta
+  vector_rotate_right(180-t)
+'  Print " centre node for region "+id+" is angle "+centre.phi
+  vector_rotate_down(-p)
+ 
+  While nl[i]
+   nl[i].phi=nl[i].phi*m
+   i=i+1
+  Wend
+ 
+  spherical_to_cart()  
+  vector_rotate_down(p)
+  vector_rotate_right(t-180)
+  
+ End Method
+
+
+ Method resize_quat(m!)
+  ' the tegress rotate to pole method for vary region size
+  Local i
+  Local p!,t!
+  Local q:quat=New quat
+
+  centre.cart_to_spherical()
+  p=centre.phi
+  t=centre.theta
+  rquat.set_with_vector_rot(0,0,1.0,180.0-t)
+'  vector_rotate_right(180-t)
+'  Print " centre node for region "+id+" is angle "+centre.phi
+  q.set_with_vector_rot(1.0,0,0,-p)
+  rquat.cross(q)
+'  vector_rotate_down(-p)
+  rotate()
+ 
+  While nl[i]
+   nl[i].phi=nl[i].phi*m
+   i=i+1
+  Wend
+ 
+  spherical_to_cart()  
+ 
+  rotate(-1.0) 
+
+'  vector_rotate_down(p)
+'  vector_rotate_right(t-180)
+  
+ End Method
+
+
+ Method cart_to_spherical()
+
+  Local n:node=Null
+  Local i=0
+  Local svp!
+
+  While nl[i]
+   n=nl[i]
+   svp!=Sin(n.phi)
+   n.x=svp*Cos(n.theta)
+   n.y=svp*Sin(n.theta)
+   n.z=Cos(n.phi)
+   i=i+1
+  Wend
+
+ End Method
+
+
+ Method spherical_to_cart()
+
+  Local n:node=Null
+  Local i=0
+  Local svp!
+
+  While nl[i]
+   n=nl[i]
+   svp!=Sin(n.phi)
+   n.x=svp*Cos(n.theta)
+   n.y=svp*Sin(n.theta)
+   n.z=Cos(n.phi)
+   i=i+1
+  Wend
+
+ End Method
+
+
+   ' Q x V x Q^-1
+   ' 1st. quat * vec to get quat
+   
+   '              PxQ = p0.q0 - P.Q ( real ) + p0.Q + q0.P + PxQ ( vector )
+   '  For  quat X vec =   0   - P.Q          + p0.Q +   0  + PxQ 
+
+ Method rotate(d!=1.0) ' direction forward or backward
+' a quat Function
+
+  Local v:node
+  Local p:quat=New quat
+  Local cq:quat=New quat ' conjugate quat
+  Local i
+  Local x!,y!,z!,s!,w!
+  
+  Local rx!=d*rquat.x
+  Local ry!=d*rquat.y
+  Local rz!=d*rquat.z
+  Local rs!=rquat.s
+
+  rquat.conjugate(cq)
+
+  While nl[i]<>Null
+   v:node=nl[i]
+   p.vec_to_quat(v.x,v.y,v.z)
+
+   ' do PQ = -P.Q + p0.Q + PxQ
+   p.s!=rquat.dot_product(p) ' real
+   p.x!=rquat.s*v.x + ry*v.z-rz*v.y   ' pure '        these v componment ?!?!?!?!
+   p.y!=rquat.s*v.y + rz*v.x-rx*v.z  ' - rx*vz + rz*vx
+   p.z!=rquat.s*v.z + rx*v.y-ry*v.x
+
+   ' now cross product with the conjugate quat (a*v)*a^-1
+  ' s=q.s*cq.s-q.dot_product(cq)      ' ???            's*cq.s+v.x*q.x+v.y*q.y+v.z*q.z' real
+
+   v.x=p.s*cq.x+cq.s*p.x + p.y*cq.z-p.z*cq.y 
+   v.y=p.s*cq.y+cq.s*p.y + p.z*cq.x-p.x*cq.z
+   v.z=p.s*cq.z+cq.s*p.z + p.x*cq.y-p.y*cq.x
+
+   ' assume the result is normalized? unverified
+
+  '  cart_to_spherical2(v) macroed here For speed. no need To pass vertices To sub-Function
+   v.theta=coord_to_angle(v.x,v.y)
+   If v.theta<0 Then v.theta=v.theta+180
+   If v.theta>=360.0 Then v.theta=v.theta-360.0
+
+   w!=Sqr(v.x*v.x+v.y*v.y)
+   v.phi=coord_to_angle(w,v.z) ' should Return angle 270..360~0..90
+
+   If v.phi>=0.0 And v.phi<=90 Then v.phi=90.0-v.phi
+   If v.phi>=270.0 Then v.phi=180.0-(v.phi-270.0)
+
+   i=i+1
+  Wend
+
+ End Method
+
+
+ Method rotate2(xi!,yi!,zi!,ang!)
+ ' a quat Function
+ ang=ang/2
+ Local cang!=Cos(180.0*ang/Pi)
+ Local sang!=Sin(180.0*ang/Pi)
+ Local i
+ Local a:node=New node
+ Local v:node
+ Local s!,x!,y!,z!,w!
+
+ a.x=xi*sang
+ a.y=yi*sang
+ a.z=zi*sang
+
+ While nl[i]<>Null
+  v=nl[i]
+  s!=-vertex_dot_product(a,v) '; real
+ ' ; quat cross product a*v
+  x!=cang*v.x+a.y*v.z-a.z*v.y  ' ; pure
+  y!=cang*v.y+a.z*v.x-a.x*v.z
+  z!=cang*v.z+a.x*v.y-a.y*v.x
+
+ '; now cross product with the inverse axis (a*v)*a^-1
+  s=s*cang+vertex_dot_product(v,a)' ; real
+
+  v.x=(cang*x-s*a.x) -(y*a.z-z*a.y)
+  v.y=(cang*y-s*a.y) -(z*a.x-x*a.z)
+  v.z=(cang*z-s*a.z) -(x*a.y-y*a.x)
+
+';  cart_to_spherical2(v) macroed here For speed. no need To pass vertices To sub-Function
+  v.theta=coord_to_angle(v.x,v.y)
+  If v.theta<0 Then v.theta=v.theta+180
+  If v.theta>=360.0 Then v.theta=v.theta-360.0
+
+  w!=Sqr(v.x*v.x+v.y*v.y)
+  v.phi=coord_to_angle(w,v.z) ' should Return angle 270..360~0..90
+
+  If v.phi>=0.0 And v.phi<=90 Then v.phi=90.0-v.phi
+  If v.phi>=270.0 Then v.phi=180.0-(v.phi-270.0)
+
+  i=i+1
+ Wend
+
+ End Method
+
+
+End Type
+
+
+
+Type quat
+ Field x!,y!,z!,s!
+
+ Method set_with_vector_rot(xi!,yi!,zi!,ang!)
+  
+  ang=ang/2.0
+  Local sang!=Sin(ang)
+  Local cang!=Cos(ang)  
+  x=xi*sang 
+  y=yi*sang
+  z=zi*sang
+  s=cang
+
+  normalize()
+
+ End Method
+
+
+ Method normalize()
+  Local w!=Sqr(x*x+y*y+z*z+s*s)
+  x=x/w;  y=y/w;  z=z/w;  s=s/w
+ End Method
+
+
+ Method vec_to_quat(xi!,yi!,zi!)
+  x=xi;  y=yi;  z=zi;   s=0.0
+ End Method
+
+
+ Method dot_product!(q:quat)
+  Return s*q.s-(x*q.x+y*q.y+z*q.z)
+ End Method
+
+  '              PxQ = ... p0.Q + q0.P + PxQ ( vector )
+
+ Method vec_cross_product:quat(q:quat,rq:quat) ' return quat, so don't have to keep making new quats
+  rq.x=s*q.x+q.s*x      + y*q.z-z*q.y   ' pure
+  rq.y=s*q.y+q.s*y      + z*q.x-x*q.z
+  rq.z=s*q.z+q.s*z      + x*q.y-y*q.x
+ End Method
+
+
+ Method inverse(rq:quat) ' return quat
+  Local r!=x*x+y*y+z*z+s*s
+  rq.x=-x/r
+  rq.y=-y/r
+  rq.z=-z/r
+  rq.s=s/r
+ End Method
+
+
+ Method conjugate(rq:quat)
+  rq.x=-x
+  rq.y=-y
+  rq.z=-z
+  rq.s=s
+ End Method
+
+
+ Method cross(q:quat)
+  Local xt!,yt!,zt!,st!
+
+  st=q.s*s-(q.x*x+q.y*y+q.z*z)
+  ';If q3\s=-1.0 Then q3\s=1.0
+
+  xt=q.s*x+s*q.x+q.y*z-q.z*y
+  yt=q.s*y+s*q.y+q.z*x-q.x*z
+  zt=q.s*z+s*q.z+q.x*y-q.y*x
+
+  s=st; x=xt ; y=yt ; z=zt
+ End Method
+
+End Type
+
+
+
+Type adjcol
+
+Field col_v,col_f
+Field nex:adjcol
+
+
+Method swap() ' can't swap the object, but can swap the values!
+
+Local v,f
+v=col_v
+f=col_f
+col_v=nex.col_v
+col_f=nex.col_f
+nex.col_v=v
+nex.col_f=f
+
+End Method
+
+
+Method swapsort() '  takes betwwen n and n^2 O(2) time
+
+Local a:adjcol
+Local s=1
+
+While s=1
+ s=0
+ a=Self
+ While a.nex
+  If a.col_f<a.nex.col_f Then a.swap(); s=1
+  a=a.nex
+ Wend
+Wend
+
+End Method
+
+
+Method prin()
+ Print col_f
+ If nex Then nex.Prin()
+End Method
+
+
+Method create_random_list(n)
+
+col_f=Rand(100)
+If n<2 Then Return
+Self.nex=New adjcol
+Self.nex.create_random_list(n-1)
+
+End Method
+
+End Type
+
+
+
+Type colm ' colour map 
+Field col
+Field adjc:adjcol
+End Type
+
+
+Type map_formatter
+
+Field cols:colm[200000]
+
+
+Method scan_map_colours()
+
+ Local i,j,k,m
+ Local n:node
+ Local aj:adjcol
+
+ DebugStop
+
+ i=0
+ While nodelist[i]
+
+  n=nodelist[i]
+
+  j=0 ' check see if colour is already present 
+  While cols[j] And j<999999
+   If n.col=cols[j].col Then Exit
+   j=j+1
+   If j>k Then k=j
+  Wend
+
+  If cols[j]=Null 
+   cols[j]=New colm
+   cols[j].col=n.col ' if not present, add it
+  EndIf
+    
+  ' now look at near nodes
+  m=0
+  While n.nnl[m]
+   aj=cols[j].adjc
+   While aj
+    If n.nnl[m].col=aj.col_v
+     aj.col_f=aj.col_f+1
+     Exit
+    EndIf
+    aj=aj.nex
+   Wend
+
+   If aj=Null
+    aj=New adjcol
+    aj.col_v=n.nnl[m].col
+    aj.col_f=1
+    aj.nex=cols[j].adjc
+    cols[j].adjc=aj
+   EndIf
+
+   m=m+1
+  Wend
+
+  i=i+1
+
+  If i Mod 2000=0 Then Print " coluor scanner processed "+i+" nodes, got "+(k+1)+" colours so far"
+ Wend
+
+ DebugStop
+
+ j=0
+ While cols[j]
+  j=j+1
+ Wend
+
+ Print "found "+j+" colours in map "
+ Print " doing duplicate check "
+
+ i=0; j=0
+ While cols[i]
+  j=i+1
+  While cols[j]
+   If cols[i]=cols[j] Then Print " error found duplicate at "+i+" "+j+" colour "+cols[i].col
+   j=j+1
+  Wend
+  i=i+1
+  If i Mod 1000=0 Then Print " duplicate check processed "+i+" nodes "
+ Wend
+
+End Method
+
+
+Method order_all_adj_lists()
+
+Local i
+Local aj:adjcol
+' eaiser to jut create a new linked list then replace old one
+
+While i<200000 And cols[i]
+ cols[i].adjc.swapsort()
+ i=i+1
+Wend
+
+End Method
+
+
+
+Method get_lowest2_abs_2nd_rank_afil:adjcol()
+' absolute sum of all col afils at there 2nd mot afiliationed ajoining colur
+' sufficient for simple maps
+
+Local i=0
+Local sum!=0.0
+Local lr:adjcol=New adjcol
+Local lrn:adjcol
+
+lr.col_f=99999999
+
+While cols[i]
+ If cols[i].adjc And cols[i].adjc.nex
+  If cols[i].adjc.nex.col_f<lr.col_f
+   lrn = New adjcol
+   lrn.col_f=cols[i].adjc.nex.col_f
+   lrn.col_v=i ' hide the col index in the v field
+   lrn.nex=lr
+  ElseIf cols[i].adjc.nex.col_f<lr.nex.col_f
+   lrn = New adjcol 
+   lrn.col_f=cols[i].adjc.nex.col_f
+   lrn.col_v=i ' hide the col index in the v field
+   lr.nex=lrn
+  EndIf
+ EndIf
+ i=i+1
+Wend
+
+Return lr
+
+End Method
+
+
+
+Method get_end_col()
+' have low afiliation with all but 1 other col
+' but what is low afil? its relative
+' so look at all other cols and decide what is low afil
+
+
+End Method
+
+
+
+Method assemble_relief_colours()
+
+
+
+End Method
+
+
+Method display_map_cols()
+
+End Method
+
+
+End Type
+
+
+
+Function create_test_map()
+
+Local n:node=New node
+worldregion=New region
+n.phi=40
+n.col=2342452
+nodelist[0]=n
+worldregion.add_node(n)
+mousenode=nodelist[0]
+update_nodes_col2()
+
+End Function
+
+
+
+Function load_map(fn$)
+
+Local x,y,i
+Local im:TPixmap=LoadPixmap(fn$)
+xmax=PixmapWidth(im)
+ymax=PixmapHeight(im)
+Local dy!=90.0/ymax
+Local n:node
+
+worldregion=New region
+regionlist[0]=worldregion
+
+For y=0 To ymax-1
+For x=0 To xmax-1
+ n=New node
+ n.theta=   x*360.0/xmax
+ n.phi  =dy+y*180.0/ymax
+ n.col=ReadPixel(im,x,y)+(1 Shl 24)
+ n.id=i
+ worldregion.add_node(n)
+
+ nodelist[i]=n
+ i=i+1
+Next
+Next
+
+i=0
+While nodelist[i]
+ n=nodelist[i]
+ y=i/xmax
+
+ If (i Mod xmax)<>xmax-1 ' east
+  n.nnl[0]=nodelist[i+1] 
+ Else
+  n.nnl[0]=nodelist[xmax*y]
+ EndIf
+
+ If (i Mod xmax<>0) ' west
+  n.nnl[1]=nodelist[i-1]
+ Else
+  n.nnl[1]=nodelist[xmax*y+xmax-1]
+ EndIf
+
+ If y>0 Then n.nnl[2]=nodelist[i-xmax]
+ If y<ymax-1 Then n.nnl[3]=nodelist[i+xmax]
+ 
+ i=i+1
+Wend
+
+refresh_map_cart()
+worldregion.merge_nodes_check()
+mousenode=nodelist[0]
+update_nodes_col2()
+
+mf=New map_formatter()
+
+End Function
+
+
+
+Function display_map_cart()
+
+Local n:node=Null
+Local zx!=0.0,zy!=0.0
+Local i=0
+Local im:TImage
+
+Cls
+ClearPixels( px )
+gh=canvas.lockch/2
+gw=canvas.lockcw/2
+SetColor 200,140,40
+DrawLine gw,0,gw,gh*2
+DrawLine 0,gh,gw*2,gh
+
+While nodelist[i]
+ n=nodelist[i]
+ If n And (n.flags & 1)=0
+  zx=gw+zoom*n.y*100*Sgn(n.z)+200*Sgn(n.z)+zoom*50*Sgn(n.z)
+  zy=gh+zoom*n.x*100
+  If zx>=0 And zx<gw*2
+   If zy>0 And zy<gh*2 Then WritePixel px,Int(zx),Int(zy),n.col
+  EndIf
+ EndIf
+
+ i=i+1
+Wend
+
+SetColor 255,255,255 ' WTF !!! have to include this else get a nice but unwanted colour blend of map
+
+px=MaskPixmap(px,0,0,0)
+im=LoadImage(MaskPixmap(px,0,0,0))
+DrawImage im,0,0
+
+End Function
+
+
+
+Function draw_mouse_node(n:node,flag=0)
+' flag set to 0 highlight colours nodes
+' flag set to 1 draws map colour
+
+Local x!,y!,xx,yy,re,gr,bl,col2
+
+If n=Null Or (n.flags & 1)=1 Then Return
+
+x=(gw*2.0-zoom*360.0)/2.0
+y=(gh*2.0-zoom*180.0)/2.0
+
+If x+zoom*n.theta>=1 And x+zoom*n.theta<gw*2-1
+If y+zoom*n.phi>=1   And y+zoom*n.phi<gh*2-1
+
+ col2=n.col+(n.reg.flags & 1)*100000
+ bl=col2 Mod 256
+ gr=(col2 Shr 8) Mod 256
+ re=col2 Shr 16
+ 
+ If zoom>20.0
+  If flag ' old , clean up
+   SetColor 0,0,0
+   For yy=-1 To 1
+   For xx=-1 To 1
+    Plot x+xx+n.theta*zoom,y+yy+n.phi*zoom
+   Next
+   Next
+
+   SetColor re,gr,bl
+   Plot x+n.theta*zoom,y+n.phi*zoom
+'   WritePixel  x+n.theta*zoom,y+n.phi*zoom,n.col+
+  Else
+
+   If n=selectednode Then SetColor 255,150,150 Else SetColor 100,200,100
+   If n=mousenode Then SetColor 150,150,255
+   If n.reg 
+    For yy=-1 To 1
+    For xx=-1 To 1
+     Plot x+xx+n.theta*zoom,y+yy+n.phi*zoom
+    Next
+    Next
+   EndIf
+  EndIf
+
+ Else
+
+  If flag
+   SetColor re,gr,bl
+  Else
+   If n=selectednode Then SetColor 255,150,150 Else SetColor 100,200,100
+   If n=mousenode Then SetColor 150,150,255
+  EndIf
+  Plot x+n.theta*zoom,y+n.phi*zoom
+
+ EndIf
+
+EndIf
+EndIf
+
+End Function
+
+
+
+Function draw_highlighted_node(n:node,oldflag,colflag)
+
+' colflag set to 0 draws map colour
+'                1 highlight colours 1
+'                2 highlight colours 2
+If n=Null Then Return
+
+Local x!,y!,xx,yy,re,gr,bl,col2
+
+x=(gw*2.0-zoom*360.0)/2.0
+y=(gh*2.0-zoom*180.0)/2.0
+
+If x+zoom*n.theta>=1 And x+zoom*n.theta<gw*2-1
+If y+zoom*n.phi>=1   And y+zoom*n.phi<gh*2-1
+
+Select colflag
+ Case 0
+  col2=n.col2'+100000*(n.reg.flags & 1)
+  bl=col2 Mod 256
+  gr=(col2 Shr 8) Mod 256
+  re=col2 Shr 16
+ Case 1
+  bl=255;gr=150;re=150
+ Case 2  
+  bl=100;gr=200;re=100
+ Case 3  
+  bl=150;gr=150;re=255
+ Case 4
+  bl=100;gr=100;re=200
+End Select
+
+ 
+ If zoom>20.0
+  If oldflag=1 ' old , clean up
+   SetColor 0,0,0
+   For yy=-1 To 1
+   For xx=-1 To 1
+    Plot x+xx+n.theta*zoom,y+yy+n.phi*zoom
+   Next
+   Next
+
+   SetColor re,gr,bl
+   Plot x+n.theta*zoom,y+n.phi*zoom
+  Else
+   SetColor re,gr,bl
+   For yy=-1 To 1
+   For xx=-1 To 1
+    Plot x+xx+n.theta*zoom,y+yy+n.phi*zoom
+   Next
+   Next
+  EndIf
+
+ Else
+  
+  SetColor re,gr,bl
+  Plot x+n.theta*zoom,y+n.phi*zoom
+ EndIf
+
+EndIf
+EndIf
+
+End Function
+
+
+
+Function highlight_nodeAndNears(n:node,colflag=-1)
+
+Local j
+Local n3:node
+
+If (displaymode & (16+32+64)) Then Return
+
+If n And (n.flags & 1=0)
+ If colflag>-1 
+  draw_highlighted_node(n,1,colflag)
+ Else
+  If n=oldmousenode[frame] Then draw_highlighted_node(n,1,0)
+  If n=mousenode Then draw_highlighted_node(n,0,1)
+  If n=selectednode Then draw_highlighted_node(n,0,3)
+ EndIf
+
+ While j<8
+  n3:node=n.nnl[j]
+  If n3 And (n3.flags & 1)=0
+   If colflag>-1
+    draw_highlighted_node(n3,1,colflag) ' currently this line is used only for drawing old selected mouse node
+   ElseIf n=mousenode
+    draw_highlighted_node(n3,0,2) 
+   ElseIf n=oldmousenode[frame]
+    draw_highlighted_node(n3,1,0)
+   ElseIf n=selectednode 
+    draw_highlighted_node(n3,0,4)
+   EndIf
+  EndIf
+  j=j+1
+ Wend
+
+EndIf
+
+If n=mousenode Then oldmousenode[frame]=n
+
+End Function
+
+
+
+Function draw_mouse_nodes()
+
+Local n:node
+Local j=0
+
+n=oldmousenode[frame]
+If n
+ While j<8
+  If n Then draw_mouse_node(n,1)
+  n=oldmousenode[frame].nnl[j]
+  j=j+1
+ Wend
+EndIf
+
+j=0
+n=mousenode
+While j<8
+ If n Then draw_mouse_node(n)
+ n=mousenode.nnl[j]
+ j=j+1
+Wend
+
+oldmousenode[frame]=mousenode
+
+End Function
+
+
+
+Function draw_flat_map()
+
+Local n:node=Null
+Local x,y,i=0,yy,cc
+Local im:TImage
+
+px:TPixmap=CreatePixmap(gw*2,gh*2,PF_BGR888)
+
+Cls
+ClearPixels(px)
+SetColor 100,40,40
+DrawLine gw,0,gw,gh*2
+DrawLine 0,gh,gw*2,gh
+
+x=(gw*2.0-zoom*360.0)/2.0
+y=(gh*2.0-zoom*180.0)/2.0
+While nodelist[i]
+ n=nodelist[i]
+
+ If n.flags & 1=0 And n.reg.flags & 2=0
+ 'SetColor (n.col Shr 16) Mod 256,(n.col Shr 8) Mod 256,n.col Mod 256
+  If x+zoom*n.theta>=0 And x+zoom*n.theta<gw*2
+   If y+zoom*n.phi>=0 And y+zoom*n.phi<gh*2 Then WritePixel px,Int(x+zoom*n.theta),Int(y+zoom*n.phi),n.col2
+  EndIf
+ EndIf
+ i=i+1
+Wend
+
+SetColor 255,255,255
+im=LoadImage(MaskPixmap(px,0,0,0))
+yy=gh-zoom*90.0
+DrawImage im,0,0
+
+'highlight_nodeAndNears(oldmousenode[frame])
+'highlight_nodeAndNears(mousenode)
+'highlight_nodeAndNears(selectednode)
+
+End Function
+
+
+
+Function display_map_closeup()
+
+px:TPixmap=CreatePixmap(gw*2,gh*2,PF_BGR888)
+Local n:node=Null
+Local x,y,i=0,xx,yy
+Local im:TImage
+
+'gwc=canvas.lockcw/2
+'ghc=canvas.lockch/2
+
+Cls
+SetColor 100,40,40
+DrawLine gw,0,gw,gh*2
+DrawLine 0,gh,gw*2,gh
+
+x=(gw*2.0-zoom*360.0)/2.0
+y=(gh*2.0-zoom*180.0)/2.0
+While nodelist[i]
+ n=nodelist[i]
+ If n.flags & 1=0
+ 'SetColor (n.col Shr 16) Mod 256,(n.col Shr 8) Mod 256,n.col Mod 256
+  If x+zoom*n.theta>=0 And x+zoom*n.theta<gw*2
+   If y+zoom*n.phi>=0 And y+zoom*n.phi<gh*2
+    For yy=-1 To 1
+    For xx=-1 To 1
+     WritePixel px,Int(xx+x+zoom*n.theta),Int(yy+y+zoom*n.phi),n.col
+    Next
+    Next
+   EndIf
+  EndIf
+ EndIf
+
+ i=i+1
+Wend
+
+n=mousenode
+
+If n And (n.flags & 1)=0
+ If zoom*n.theta>=1 And zoom*n.theta<gw*2-1
+ If zoom*n.phi>=1 And zoom*n.phi<gh*2-1
+  SetColor 150,150,255
+  For yy=-1 To 1
+  For xx=-1 To 1  
+   WritePixel px,Int(x+xx+n.theta*zoom),Int(yy+n.phi*zoom),255+(255 Shl 8)+(255 Shl 16)
+  Next
+  Next
+ EndIf
+ EndIf
+EndIf
+
+SetColor 255,255,255
+im=LoadImage(MaskPixmap(px,0,0,0))
+'xx=(gwc*2.0-zoom*360.0)/2.0
+yy=gh-zoom*90.0
+'If xx<0 Then xx=0
+'If yy<0 Then yy=0
+DrawImage im,0,0
+'Release im
+
+End Function
+
+
+
+Function draw_oblate_map()
+
+px:TPixmap=CreatePixmap(gw*2,gh*2,PF_BGR888)
+Local n:node=Null
+Local i=0,col,xd,yd,p=0,xi,yi
+Local x!,sfx!,sfy!,ydis!
+
+Cls
+ClearPixels(px)
+
+While nodelist[i]
+ n=nodelist[i]
+ If n And (n.flags & 1)=0
+
+  SetColor (n.col Shr 16) Mod 256,(n.col Shr 8) Mod 256,n.col Mod 256
+
+  col=n.col
+
+  ydis!=Abs(n.y)
+  x!=(n.theta-180.0)*(0.01+Sqr(Sin(n.phi)))
+  sfx!=1.00*zoom
+  sfy!=1.35*zoom
+
+  xd=gw+sfx*x
+  yd=gh+sfy*(n.phi-90)
+  
+  If Abs(n.z)<1.0/2.0
+   p=1
+  ElseIf Abs(n.z)<4.0/5.0
+   p=2
+  ElseIf Abs(n.z)<9.0/10.0
+   p=3
+  Else 
+   p=4
+  EndIf
+
+  xi=-p
+  While xi<=p
+   For yi=0 To 1
+    If xd+xi>=0 And xd+xi<gw*2
+     If yd+yi>=0 And yd+yi<gh*2 Then WritePixel px,xd+xi,yd+yi,col
+    EndIf
+   Next
+   xi=xi+1
+  Wend
+ EndIf
+
+ i=i+1
+Wend
+DrawPixmap px,0,0
+
+gh=canvas.lockch/2
+gw=canvas.lockcw/2
+SetColor 100,40,40
+DrawLine gw,0,gw,gh*2
+DrawLine 0,gh,gw*2,gh
+
+End Function
+
+
+
+Function draw_globe(x=0,y=0,s!=1.0)
+
+px:TPixmap=CreatePixmap(gw*2,gh*2,PF_BGR888)
+Local n:node
+Local xx!,dfcop!,yy!,zz!
+Local z2,y2,c,i
+
+x=gw
+y=gh
+
+If worldregion=Null Then Return
+
+Cls
+ClearPixels(px)
+
+n=nodelist[0]
+While n
+ If (n.flags & 1)=0
+  If n.x<-0.37
+   c=n.col2
+
+   xx!=4.0-n.x
+   dfcop!=((xx^2.2)+2.5)*(-4.5)
+
+   yy!=n.y*dfcop
+   zz!=n.z*dfcop
+  
+   yy=yy*zoom*s+x
+   zz=zz*zoom*s+y
+
+   If n.x<-0.7
+    For z2=-2 To 2
+    For y2=-2 To 2
+     If yy+y2>0 And yy+y2<gw*2
+      If zz+z2>0 And zz+z2<gh*2 Then WritePixel px,Int(yy+y2),Int(zz+z2),c
+     EndIf
+    Next
+    Next
+   ElseIf n.x<-0.5
+    For z2=-1 To 1
+    For y2=-1 To 1
+     If yy+y2>0 And yy+y2<gw*2
+      If zz+z2>0 And zz+z2<gh*2 Then WritePixel px,Int(yy+y2),Int(zz+z2),c 
+     EndIf
+    Next
+    Next
+   Else
+    If yy>0 And yy<gw*2 And zz>0 And zz<gh*2 Then WritePixel px,Int(yy),Int(zz),c
+   EndIf
+
+  EndIf
+ EndIf
+
+ i=i+1
+ n=nodelist[i]
+Wend
+DrawPixmap px,0,0
+
+End Function
+
+
+
+Function refresh_map_cart()
+
+Local n:node=Null
+Local i=0
+Local svp!
+
+While nodelist[i]
+ n=nodelist[i]
+ svp!=Sin(n.phi)
+ n.x=svp*Cos(n.theta)
+ n.y=svp*Sin(n.theta)
+ n.z=Cos(n.phi)
+ i=i+1
+Wend
+
+End Function
+
+
+
+Function refresh_map_spherical()
+
+Local n:node=Null
+Local i
+Local w!
+
+While nodelist[i]
+ n=nodelist[i]
+ n.theta=coord_to_angle(n.x,n.y)
+ n.theta=mod2f(n.theta,360.0)
+
+ w!=Sqr(n.x*n.x+n.y*n.y)
+ n.phi=coord_to_angle(w,n.z) ' should Return angle 270..360~0..90
+
+ If n.phi>=0.0 And n.phi<=90 Then n.phi=90.0-n.phi
+ If n.phi>=270.0 Then n.phi=180.0-(n.phi-270.0)
+ i=i+1
+Wend
+
+End Function
+
+
+
+Function cart_shift_down(rang!,dang!)
+
+rang=rang/zoom
+dang=dang/zoom
+
+Local sin_down!=Sin(dang)
+Local cos_down!=Cos(dang)
+Local n:node=Null
+Local i=0
+Local xo!,w!
+Local q:quat=New quat
+' quat rotation for test, but for usual : consider euler rotation, its faster!
+
+worldregion.rquat.set_with_vector_rot(0,0,1.0,rang)
+q.set_with_vector_rot(0,1.0,0,-dang)
+worldregion.rquat.cross(q)
+q.set_with_vector_rot(0,0,1.0,-rang)
+worldregion.rquat.cross(q)
+
+worldregion.rotate()
+Return
+
+While nodelist[i]
+ n=nodelist[i]
+ 
+ xo!=n.x
+ n.x=xo*cos_down-n.z*sin_down
+ n.z=xo*sin_down+n.z*cos_down
+
+ n.theta=coord_to_angle(n.x,n.y)
+ n.theta=mod2f(n.theta,360.0)
+
+ w!=Sqr(n.x*n.x+n.y*n.y)
+ n.phi=coord_to_angle(w,n.z) 'should Return angle 270..360~0..90
+
+ If n.phi>=0.0 And n.phi<=90 Then n.phi=90.0-n.phi
+ If n.phi>=270.0 Then n.phi=180.0-(n.phi-270.0)
+
+ i=i+1
+Wend
+
+End Function
+
+
+
+Function cart_shift_clock(ang!)
+
+ang=-ang
+Local sin_clock!=Sin(ang)
+Local cos_clock!=Cos(ang)
+Local n:node=Null
+Local i=0
+Local yo!,w!
+
+worldregion.rquat.set_with_vector_rot(1.0,0,0,ang)
+worldregion.rotate()
+Return
+
+While nodelist[i]
+ n=nodelist[i]
+
+ yo!=n.y
+ n.y=yo*cos_clock-n.z*sin_clock
+ n.z=yo*sin_clock+n.z*cos_clock
+
+ n.theta=coord_to_angle(n.x,n.y)
+
+ w!=Sqr(n.x*n.x+n.y*n.y)
+ n.phi=coord_to_angle(w,n.z) ' should Return angle 270..360~0..90
+
+ If n.phi>=0.0 And n.phi<=90 Then n.phi=90.0-n.phi
+ If n.phi>=270.0 Then n.phi=180.0-(n.phi-270.0)
+
+ i=i+1
+Wend
+
+End Function
+
+
+
+Function cart_shift_right(ang!)
+
+ang=ang/zoom
+
+Local cos_right!=Cos(ang)
+Local sin_right!=Sin(ang)
+Local n:node=Null
+Local i=0
+Local xo!
+
+worldregion.rquat.set_with_vector_rot(0,0,1.0,ang)
+worldregion.rotate()
+Return
+
+While nodelist[i]
+ n=nodelist[i]
+ n.theta=mod2f(n.theta+ang,360.0)
+  
+ xo!=n.x
+ n.x=xo*cos_right-n.y*sin_right
+ n.y=xo*sin_right+n.y*cos_right
+
+ i=i+1
+Wend
+
+End Function
+
+
+
+Function rotate_region_around_axis(r:region,a:node,ang!)
+' a quat Function
+
+ang=ang/2
+Local cang!=Cos(180.0*ang/Pi)
+Local sang!=Sin(180.0*ang/Pi)
+Local v:node
+Local i
+Local x!,y!,z!,s!,w!
+
+a.x=a.x*sang
+a.y=a.y*sang
+a.z=a.z*sang
+
+While r.nl[i]<>Null
+ v:node=r.nl[i]
+ s!=-vertex_dot_product(a,v) ' real
+ ' quat cross product a*v
+ x!=cang*v.x+a.y*v.z-a.z*v.y   ' pure
+ y!=cang*v.y-(a.x*v.z-a.z*v.x)
+ z!=cang*v.z+a.x*v.y-a.y*v.x
+
+ ' now cross product with the inverse axis (a*v)*a^-1
+ s=s*cang+vertex_dot_product(v,a) ' real
+
+ v.x=(cang*x-s*a.x) -(y*a.z-z*a.y)
+ v.y=(cang*y-s*a.y) +(x*a.z-z*a.x)
+ v.z=(cang*z-s*a.z) -(x*a.y-y*a.x)
+
+'  cart_to_spherical2(v) macroed here For speed. no need To pass vertices To sub-Function
+  v.theta=coord_to_angle(v.x,v.y)
+  If v.theta<0 Then v.theta=v.theta+180
+  If v.theta>=360.0 Then v.theta=v.theta-360.0
+
+  w!=Sqr(v.x*v.x+v.y*v.y)
+  v.phi=coord_to_angle(w,v.z) ' should Return angle 270..360~0..90
+
+  If v.phi>=0.0 And v.phi<=90 Then v.phi=90.0-v.phi
+  If v.phi>=270.0 Then v.phi=180.0-(v.phi-270.0)
+
+ i=i+1
+Wend
+
+End Function
+
+
+
+Function vertex_dot_product!(v1:node,v2:node)
+ Return v1.x*v2.x+v1.y*v2.y+v1.z*v2.z
+End Function
+
+
+
+Function vertex_quat_dot_product!(v:node,q:quat)
+ Return v.x*q.x+v.y*q.y+v.z*q.z
+End Function
+
+
+
+Function move_mouse_node()
+
+Local i,j
+Local th!,ph!,dist!,ndist!,x!,y!
+th!=mox3+180.0
+ph!=moy3+90.0
+
+Local nnsf:node=mousenode
+
+While i<10
+
+ x!=th-mousenode.theta
+ y!=ph-mousenode.phi
+ dist!=x*x+y*y
+
+ For j=0 To 7
+  If mousenode.nnl[j]
+   x!=th-mousenode.nnl[j].theta
+   y!=ph-mousenode.nnl[j].phi
+   ndist!=x*x+y*y
+   If ndist<dist 
+    nnsf=mousenode.nnl[j]
+    dist=ndist
+   EndIf
+  EndIf
+ Next
+ If mousenode=nnsf 
+  Return 
+ Else 
+  mousenode=nnsf
+ EndIf
+ 
+ i=i+1
+Wend
+
+End Function
+
+
+
+Function try_add_node_to_nnl(np:node,n:node)
+' candidate node and node with list
+
+Local i=0,nc=0,fnisf=0
+Local x!,y!,z!,cdist!,dist!,fdsf!
+
+If np=Null Or (np.flags & 1)=1 Then Return
+If n=Null Or (n.flags & 1)=1 Then Return
+
+x!=n.x-np.x
+y!=n.y-np.y
+z!=n.z-np.z
+cdist!=x*x+y*y+z*z
+
+For i=0 To 7
+ If n.nnl[i]=np Then Return ' don't need to add if its already there
+ If n.nnl[i] And (n.nnl[i].flags & 1=0) Then nc=nc+1
+Next
+
+If nc>7 ' no space left, only pick it if its closer
+
+ nc=0
+ For i=0 To 7
+  If n.nnl[i] And (n.nnl[i].flags & 1=0)
+   x!=n.x-n.nnl[i].x
+   y!=n.y-n.nnl[i].y
+   z!=n.z-n.nnl[i].z
+   dist!=x*x+y*y+z*z
+   If dist>fdsf
+    fdsf=dist
+    fnisf=i
+   EndIf
+   nc=nc+1
+  EndIf
+ Next
+
+ If nc<8 And cdist<fdsf Then angle_check(n,np)
+ 
+Else ' plenty space, pick if passes angle criterion
+ angle_check(n,np)
+EndIf
+
+End Function
+
+
+
+Function angle_check(n:node,nc:node)
+' is nc viable as a near node to n?
+' it must be the closest in a 10 degree range
+' xunction will replace one near node with another if the angle between them is small and the new one is closer
+Local x!,y!,z!,le!,x2!,y2!,z2!,le2!,sca!
+Local i
+Local ndb:node
+
+x!=nc.x-n.x
+y!=nc.y-n.y
+z!=nc.z-n.z
+le!=(x*x+y*y+z*z)^0.5
+
+For i=0 To 7
+ If n.nnl[i]<>nc And n.nnl[i]<>Null And (n.nnl[i].flags & 1=0)
+   ndb:node=n.nnl[i]
+   x2!=n.nnl[i].x-n.x
+   y2!=n.nnl[i].y-n.y
+   z2!=n.nnl[i].z-n.z
+   le2!=(x2*x2+y2*y2+z2*z2)^0.5
+
+   sca!=(x*x2+y*y2+z*z2)/(le*le2)
+   If sca>0.984 ' then angle is less than 10 degrees , pick the closet node, remove the furthest
+    If le<le2 Then n.nnl[i]=nc
+    Return
+   EndIf
+ EndIf
+Next
+
+' if get here none of angles are similar, node is distinct in angle, so just add
+For i=0 To 7
+ If n.nnl[i]=Null Or (n.nnl[i].flags & 1=1)
+  n.nnl[i]=nc
+  Return
+ EndIf
+Next
+
+End Function
+
+
+
+Function merge_node_check(n:node,nb:node)
+' nb before node, needed to prevent 'delete all nodes' bug
+
+Local i=0,j=0,k,merged=0
+Local x!,y!,z!
+Local nr:node,nr2:node
+
+If n=Null Or (n.flags & 1=1) Then Return
+
+For i=0 To 7
+ If n.nnl[i] And (n.nnl[i].flags & 1=0) And n.nnl[i]<>nb
+  x!=n.x-n.nnl[i].x
+  y!=n.y-n.nnl[i].y
+  z!=n.z-n.nnl[i].z
+  If x*x+y*y+z*z<0.000001
+   ' ok merge nodes, 1st try adding near nodes to near nodelist
+   nr:node=n.nnl[i]
+   nr.flags=nr.flags | 1
+
+   For j=0 To 7
+    If nr.nnl[j] And (nr.nnl[j].flags & 1=0)
+     If nr.nnl[j]<>n Then try_add_node_to_nnl(nr.nnl[j],n)
+    EndIf
+   Next
+
+   ' then replace merged node from its near node's list
+   For j=0 To 7
+    If nr.nnl[j]<>n And nr.nnl[j]<>Null And (nr.nnl[j].flags & 1=0)
+     nr2:node=nr.nnl[j]
+     For k=0 To 7
+      If nr2.nnl[k]=nr Then try_add_node_to_nnl(n,nr2)
+     Next
+    EndIf
+   Next
+
+   merged=1
+  EndIf
+ EndIf
+Next
+
+Return merged
+
+End Function
+
+
+
+Function merge_node(n:node,n3:node)
+ ' n3 is merged into n. n3 is deleted
+ Local i,j
+
+ ' intitially just give all n3 near nodes to n
+ While i<8
+  While j<16
+   If n.nnl[j]=Null Or (n.nnl[j].flags & 1=1)
+    n.nnl[j]=n3.nnl[i]
+    i=i+1
+    Exit
+   EndIf
+   j=j+1
+  Wend 
+ Wend
+
+ ' the remove duplicate
+ remove_duplicates_in_nnl(n,16)
+
+End Function
+
+
+
+Function remove_duplicates_in_nnl(n:node,k)
+
+Local i,j
+
+For i=0 To k-2
+ If n.nnl[i]<>Null
+  For j=i+1 To k-1
+   If n.nnl[i]=n.nnl[j] Then n.nnl[j]=Null
+  Next
+ EndIf
+ 
+ If n.nnl[i]=n Then n.nnl[i]=Null
+Next
+
+If n.nnl[i]=n Then n.nnl[i]=Null
+
+End Function
+
+
+
+Function node_in_list(n:node,nl:node)
+
+Local i
+
+For i=0 To 7
+ If nl.nnl[i]=n Then Return i
+Next
+Return -1
+
+End Function
+
+
+
+Function process_movemouse()
+
+ Local dist!=0.0,x!,y!,z!
+ mox=EventX()
+ moy=EventY()
+ mox2=mox-gw
+ moy2=moy-gh
+ mox3=Double(mox2)/zoom
+ moy3=Double(moy2)/zoom
+ Move_Mouse_node()
+
+ highlight_nodeAndNears(oldmousenode[frame])
+ highlight_nodeAndNears(mousenode)
+ highlight_nodeAndNears(selectednode)
+
+ If selectednode
+  x!=selectednode.x-mousenode.x
+  y!=selectednode.y-mousenode.y
+  z!=selectednode.z-mousenode.z
+  dist!=(x*x+y*y+z*z)^0.5
+ EndIf
+
+ SetColor 0,0,0
+ DrawRect 10,2*gh-85,200,85
+ DrawRect 300,2*gh-85,200,85
+
+ SetColor 222,222,222
+ DrawText(mox+" "+moy,10,2*gh-40)
+ DrawText(mox2+" "+moy2,10,2*gh-55)
+ DrawText(mox3+" "+moy3,10,2*gh-70)
+ DrawText(zoom,10,2*gh-85)
+
+ DrawText((mousenode.theta-180)+" "+(mousenode.phi-90.0),300,2*gh-40)  
+ DrawText(mousenode.id,300,2*gh-55)
+ DrawText(dist,300,2*gh-70)
+ DrawText("reg id : "+mousenode.reg.id,300,2*gh-85)
+
+ Flip 0
+ frame=1-frame
+
+End Function
+
+
+
+Function update_mouse()
+
+ Local md3_Ang!,i
+ Local evid=EventID()
+
+ If event=event_mousemove
+  process_movemouse()
+ ElseIf event=EVENT_WINDOWCLOSE
+			FreeGadget canvas
+			End
+ EndIf
+ 
+ If event=event_menuaction
+  Select EventData()
+   Case menu_flat    ; displaymode=      displaymode -( displaymode & (16+32+64) )
+   Case menu_oblate  ; displaymode= 16 + displaymode -( displaymode & (16+32+64) ) 
+   Case menu_globe   ; displaymode= 32 + displaymode -( displaymode & (16+32+64) ) 
+   Case menu_regions ; displaymode= displaymode | 1
+   Case menu_map     ; displaymode= displaymode - (displaymode & 1)
+   Case menu_altitude
+     mf.scan_map_colours()   
+     mf.order_all_adj_lists()
+
+
+   Case fragment_regions
+    i=0
+    While regionlist[i]
+     If (regionlist[i].flags & 1) 
+      regionlist[i].random_fragment(6)
+      regionlist[i].flags=regionlist[i].flags-1
+     EndIf
+
+     i=i+1
+    Wend
+
+   Case flip_invisible
+    i=0
+    While regionlist[i]
+     If (regionlist[i].flags & 1) 
+      regionlist[i].flags=regionlist[i].flags-1
+      If (regionlist[i].flags & 2)=2 Then regionlist[i].flags=regionlist[i].flags-2 Else regionlist[i].flags=regionlist[i].flags+2
+     EndIf
+
+     i=i+1
+    Wend
+    
+  End Select
+
+  update_display()
+ EndIf
+
+
+ If event=event_mousedown
+  ed=EventData()
+
+  If input_state=0
+   If ed=1
+    cart_shift_right(gw-mox)
+   ElseIf ed=2
+    cart_shift_down(gw-mox,gh-moy)
+   ElseIf ed=3
+    md3_ang!=90+ATan2(moy-gh,mox-gw)
+    If md3_ang<0 Then md3_ang=md3_ang+360 
+    cart_shift_clock(md3_ang)
+   EndIf
+
+   refresh_map_spherical()
+   move_mouse_node()
+
+   update_display()
+
+  ElseIf input_state=1
+   If ed=1 Then try_select_node()
+  ElseIf input_state=2
+   If ed=1 Then try_select_region()
+   If ed=2 Then PopupWindowMenu window,mousemenu
+  EndIf
+
+ EndIf
+
+ If event=event_mousewheel
+  zoom=zoom+zoom*0.1*EventData()
+  update_display()
+ EndIf
+
+End Function
+
+
+
+Function update_display()
+ ' consider include display map close up
+ Local i
+
+ update_nodes_col2()
+ 
+ For i=0 To 1
+  Select ((displaymode Shr 4) Mod 8)
+   Case 0 ; draw_flat_map()
+   Case 1 ; draw_oblate_map()
+   Case 2 ; draw_globe()
+  End Select
+  Flip 0
+  frame=1-frame
+ Next
+
+End Function
+
+
+
+Function try_select_node()
+
+highlight_nodeAndNears(selectednode,0)
+selectednode=mousenode
+
+End Function
+
+
+
+Function try_select_region()
+
+Local r:region
+
+r:region = mousenode.reg
+If r.flags & 1=1 Then r.flags=r.flags-1 Else r.flags=r.flags+1
+
+update_nodes_col2()
+update_display()
+
+End Function
+
+
+
+Function update_nodes_col2()
+
+Local i
+
+While nodelist[i]
+ If nodelist[i].flags & 1=0 Then nodelist[i].setcol2()
+ i=i+1
+Wend
+
+End Function
+
+
+
+Function check_list_for_duplicates(nl:node[],it=-1)
+
+Local le=Len(nl)
+Local id[le]
+Local i,dn
+
+While i<le
+ id[i]=-1
+ i=i+1
+Wend
+
+i=0
+While i<le
+ If nl[i]
+  If id[nl[i].id]<>-1
+   Print " duplicate found : node "+nl[i].id'
+   dn=dn+1
+  EndIf
+  id[nl[i].id]=1
+ EndIf
+ i=i+1
+Wend
+
+Return dn
+
+End Function
+
+
+'create_test_map()
+load_map("testmap0.png")
+'load_map("small_world_map1400x700.bmp")
+update_display()
+
+refresh_map_cart()
+refresh_map_spherical()
+SetColor 222,222,222
+
+
+
+Local md3_ang!
+Local x,y,i=0,a$
+
+While Not KeyHit(key_escape)
+
+ event=PollEvent()
+ Select event
+  Case 0 ' no event
+  Case event_mousemove
+  Case EVENT_WINDOWCLOSE
+  Case event_mousedown
+  Case event_mousewheel 
+'  Case 258 ' unknown event ( no input )
+'  Case 16388 ' unknown event ( no pinout )
+'  Case 1029 ' unknown event ( no input )
+'  Case 8194 ' unknown event ( no input )
+'  Case 1026 ' move off ?
+'  Case 1030 ' mve off canvas / move to window top border
+  Case event_keydown
+   debug1=1
+  Case event_gadgetAction
+   a$=GadgetText(TGadget(EventSource()))
+   If a="Alter View" Then input_state=0
+   If a="Select Node" Then input_state=1
+   If a="Select Region" Then input_state=2
+ '  If a="Fragment Region" Then input_state=3
+  Case EVENT_MENUACTION 
+   If EventID()=fragment_regions ' as it happens, eventID is not the correct field to get event source\id\whatever, its eventDATA
+    i=0
+    While regionlist[i]
+     If (regionlist[i].flags & 1) 
+      regionlist[i].random_fragment(6)
+      regionlist[i].flags=regionlist[i].flags-1
+      i=i+1
+     EndIf
+    Wend
+   EndIf
+  Default
+ End Select
+  
+ update_mouse()
+
+Wend
